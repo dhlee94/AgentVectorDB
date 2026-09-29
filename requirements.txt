@@ -1,0 +1,23 @@
+# --- Parser / Chunker (Task 2 - 1단계) ---
+langchain-core>=0.3
+langchain-text-splitters>=0.3
+pymupdf>=1.24
+pymupdf4llm>=0.0.17
+pandas>=2.0
+openpyxl>=3.1
+tabulate>=0.9          # pandas.DataFrame.to_markdown() 필수 의존성
+python-docx>=1.1
+docling>=2.0           # 복잡 PDF/DOCX 1순위 파서 (torch 의존 — 미설치 시 PyMuPDF4LLM으로 자동 대체)
+# xlrd>=2.0            # 구형 .xls 지원이 필요할 때만
+
+# --- Indexing / Retriever / Pipeline ---
+langchain>=0.3,<0.4    # LocalFileStore, create_kv_docstore (Parent 영속 저장)
+langchain-chroma>=0.2
+chromadb>=1.0
+rank-bm25>=0.2.2
+kiwipiepy>=0.20        # 한국어 형태소 분석 (BM25 토큰화)
+anthropic>=0.125       # 공식 Claude SDK (Python 3.9는 0.x, 3.10+는 1.x 사용 가능)
+pyyaml>=6.0            # config.yaml 로딩
+python-dotenv>=1.0     # .env 로딩 (API 키)
+langchain-huggingface  # 기본 임베딩 bge-m3 (다른 Embeddings를 주입하면 불필요)
+sentence-transformers  # bge-m3 임베딩 / bge-reranker 재순위
