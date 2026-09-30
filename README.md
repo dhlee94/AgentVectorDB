@@ -115,3 +115,11 @@ cp .env.example .env
 python -m rag ingest ./data/inbox
 python -m rag query "볼펜 할인율은?"
 ```
+
+### 테스트
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest        # 84개, 약 15초
+```
+실제 Claude API와 bge-m3 모델 없이 실행됩니다 (가짜 LLM 클라이언트와 가짜 임베딩 사용, 샘플 문서는 테스트 시작 시 생성). 비용이나 네트워크가 필요 없습니다.
