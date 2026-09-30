@@ -43,6 +43,9 @@ class ParserConfig:
     # (Docling 결과 글자 수 / PyMuPDF 원시 텍스트 글자 수)가 이 비율 미만이면
     # Docling이 본문을 누락했다고 보고 Fallback 파서로 재파싱합니다.
     min_docling_text_ratio: float = 0.5
+    # PDF 헤더가 한 수준(##)으로 평평하게 추출되면 "N장/부록/1." 번호 패턴으로 계층을 복원합니다.
+    # (이미 계층이 살아 있는 PDF에는 자동으로 적용되지 않습니다)
+    pdf_restore_heading_levels: bool = True
 
     # ---------------------------------------------------------------- Excel
     # True면 병합 셀 유무와 관계없이 모든 시트를 서술형 템플릿으로 변환합니다.

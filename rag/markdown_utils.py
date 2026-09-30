@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # 페이지 마커
@@ -131,3 +131,112 @@ def build_markdown_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -
         cells = list(row) + [""] * (width - len(row))  # 열 수가 모자란 행은 빈 셀로 채움
         lines.append("| " + " | ".join(escape_table_cell(c) for c in cells[:width]) + " |")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# PDF 헤더 수준 복원
+# ---------------------------------------------------------------------------
+# PDF 파서(PyMuPDF4LLM, Docling)는 글자 크기로 제목을 찾기 때문에 "2부", "13장", "핵심 교훈"을
+# 모두 같은 수준(##)으로 뽑는 경우가 많습니다. 계층이 평평하면
+#   (1) "실전 체크리스트"가 몇 장 소속인지 사라져 인용이 모호해지고,
+#   (2) 청커의 "같은 장 안에서만 병합" 규칙이 동작하지 않아 Parent가 잘게 쪼개집니다.
+# 제목의 번호 패턴(N장, 부록, 1., 1.1)으로 수준을 다시 매깁니다.
+_HEADING_LINE_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_BOLD_SEGMENT_RE = re.compile(r"\*\*(.+?)\*\*")
+_PART_RE = re.compile(r"^\d+\s*부[.\s:]")
+_CHAPTER_RE = re.compile(r"^(제\s*)?\d+\s*장[.\s:]|^chapter\s+\d+\b|^부록(\s|$|[A-Za-z~])", re.IGNORECASE)
+_SUBNUMBER_RE = re.compile(r"^\d+(\.\d+)*[.)]\s")
+# 제목이 아니라 강조된 문장/도입구인 경우: "왜냐하면:", "그러나 현실은 냉혹했다."
+_SENTENCE_LIKE_RE = re.compile(r"(:|다\.|요\.|니다\.)$")
+# 이 문자로 끝나는 조각은 줄바꿈으로 잘린 제목의 앞부분 → 다음 조각과 합침 ("…AGENTS.md," + "CLAUDE.md…")
+_CONTINUATION_ENDINGS = (",", "·", "&", "—", "-", "및")
+
+
+def _split_heading_segments(text: str) -> List[str]:
+    """`**1장. 제목** **시작하며: 부제**` 처럼 한 줄에 합쳐진 여러 제목을 조각으로 나눕니다."""
+    segments = _BOLD_SEGMENT_RE.findall(text)
+    # 굵은 조각 외의 글자가 남아 있으면 한 제목 안에 강조가 섞인 것이므로 나누지 않습니다.
+    if not segments or _BOLD_SEGMENT_RE.sub("", text).strip():
+        return [clean_header_text(text)]
+    merged: List[str] = []
+    for seg in (clean_header_text(s) for s in segments):
+        if not seg:
+            continue
+        if merged and merged[-1].endswith(_CONTINUATION_ENDINGS):
+            merged[-1] = f"{merged[-1]} {seg}"
+        else:
+            merged.append(seg)
+    return merged
+
+
+def restore_heading_levels(markdown: str, min_chapters: int = 2, flat_ratio: float = 0.9) -> Tuple[str, Dict[str, int]]:
+    """평평해진 PDF 헤더를 번호 패턴으로 계층화합니다.
+
+    규칙
+        N장 / 제N장 / Chapter N / 부록        → #   (장: 최상위, 번호가 문서 전체에서 유일)
+        장 안의 번호 없는 제목                  → ##
+        "1. …" / "1.1 …" 번호 소제목            → ###
+        첫 장 이전의 제목(표지, 저자의 말, 목차) → #
+        N부 제목                                → 굵은 본문으로 강등
+        "…다." / "…:"로 끝나는 강조 문장        → 굵은 본문으로 강등
+
+    [왜 "부"를 계층에서 빼는가]
+    추출된 PDF에서 "N부" 제목은 신뢰할 수 없습니다. 실제 사례에서 "6부" 배너가 5부 소속인
+    19장과 같은 줄로 추출되었고, 같은 부 제목이 두 번 나오기도 했습니다. 잘못된 부를 경로에 넣으면
+    인용이 틀리므로, 문서 전체에서 유일한 장 번호를 최상위로 씁니다(텍스트는 본문으로 남겨 검색 가능).
+
+    [안전장치]
+    이미 계층이 살아 있는 문서를 망가뜨리지 않도록, 헤더의 flat_ratio 이상이 한 수준에 몰려 있고
+    장 패턴이 min_chapters개 이상일 때만 적용합니다.
+
+    Returns:
+        (변환된 markdown, 통계 dict). 적용하지 않았으면 원문과 {"applied": 0}.
+    """
+    lines = markdown.split("\n")
+    heading_idx = [i for i, line in enumerate(lines) if _HEADING_LINE_RE.match(line)]
+    if not heading_idx:
+        return markdown, {"applied": 0}
+
+    level_counts: Dict[int, int] = {}
+    chapter_count = 0
+    for i in heading_idx:
+        m = _HEADING_LINE_RE.match(lines[i])
+        level_counts[len(m.group(1))] = level_counts.get(len(m.group(1)), 0) + 1
+        chapter_count += sum(1 for s in _split_heading_segments(m.group(2)) if _CHAPTER_RE.match(s))
+    is_flat = max(level_counts.values()) / len(heading_idx) >= flat_ratio
+    if not is_flat or chapter_count < min_chapters:
+        return markdown, {"applied": 0}
+
+    stats = {"applied": 1, "chapters": 0, "sections": 0, "subsections": 0, "demoted": 0, "parts_demoted": 0}
+    out: List[str] = []
+    in_chapter = False
+    in_fence = False
+    for line in lines:
+        if line.strip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+        m = None if in_fence else _HEADING_LINE_RE.match(line)
+        if not m:
+            out.append(line)
+            continue
+
+        for seg in _split_heading_segments(m.group(2)):
+            if _PART_RE.match(seg):
+                out.extend([f"**{seg}**", ""])
+                stats["parts_demoted"] += 1
+            elif _CHAPTER_RE.match(seg):
+                out.extend([f"# {seg}", ""])
+                in_chapter = True
+                stats["chapters"] += 1
+            elif _SENTENCE_LIKE_RE.search(seg):
+                out.extend([f"**{seg}**", ""])
+                stats["demoted"] += 1
+            elif not in_chapter:
+                out.extend([f"# {seg}", ""])  # 표지·서문·목차 등 첫 장 이전
+                stats["chapters"] += 1
+            elif _SUBNUMBER_RE.match(seg):
+                out.extend([f"### {seg}", ""])
+                stats["subsections"] += 1
+            else:
+                out.extend([f"## {seg}", ""])
+                stats["sections"] += 1
+    return "\n".join(out), stats

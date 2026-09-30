@@ -7,7 +7,7 @@ import logging
 import sys
 
 from rag.config import load_config
-from rag.exceptions import ConfigError
+from rag.exceptions import RAGError
 from rag.pipeline import RAGPipeline
 
 
@@ -33,15 +33,17 @@ def main(argv: "list[str] | None" = None) -> int:
 
     try:
         config = load_config(args.config)
-    except ConfigError as exc:
-        print(exc, file=sys.stderr)
+        if args.store:
+            config.store.persist_dir = args.store
+        pipeline = RAGPipeline(config)
+        if args.command == "ingest":
+            report = pipeline.ingest(args.folder)
+    except RAGError as exc:
+        # 설정 오류, 의존성 누락, 폴더 없음 등 사용자가 고칠 수 있는 오류는 traceback 대신 안내만 출력
+        print(f"오류: {exc}", file=sys.stderr)
         return 2
-    if args.store:
-        config.store.persist_dir = args.store
-    pipeline = RAGPipeline(config)
 
     if args.command == "ingest":
-        report = pipeline.ingest(args.folder)
         print(report.summary())
         for failure in report.failures:
             print(f"  실패: {failure.source_path} — {failure.error_type}: {failure.reason}")

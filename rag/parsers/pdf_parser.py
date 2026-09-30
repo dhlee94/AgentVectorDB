@@ -25,7 +25,7 @@ import fitz  # PyMuPDF
 
 from rag.config import ParserConfig
 from rag.exceptions import EmptyDocumentError, EncryptedDocumentError, ParserError
-from rag.markdown_utils import normalize_text, page_marker, strip_page_markers
+from rag.markdown_utils import normalize_text, page_marker, restore_heading_levels, strip_page_markers
 from rag.parsers.base import BaseParser, ParseOutput
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,16 @@ class PDFParser(BaseParser):
 
     # ------------------------------------------------------------------ main
     def _parse(self, file_path: Path) -> ParseOutput:
+        output = self._parse_routed(file_path)
+        if self.config.pdf_restore_heading_levels:
+            # Docling/PyMuPDF4LLM 모두 제목 계층을 평평하게 뽑는 경우가 많아 번호 패턴으로 복원합니다.
+            output.markdown, stats = restore_heading_levels(output.markdown)
+            if stats.get("applied"):
+                output.metadata["heading_restore"] = stats
+                logger.info("헤더 수준 복원: %s", stats)
+        return output
+
+    def _parse_routed(self, file_path: Path) -> ParseOutput:
         profile = self._preflight(file_path)
         warnings: List[str] = []
         metadata: dict = {

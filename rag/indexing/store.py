@@ -45,15 +45,67 @@ def build_default_embeddings(config: StoreConfig) -> Embeddings:
             "또는 RAGPipeline(embeddings=...)로 다른 Embeddings 구현을 주입하세요."
         ) from exc
 
-    model_kwargs: Dict[str, Any] = {}
-    if config.embedding_device:
-        model_kwargs["device"] = config.embedding_device
-    return HuggingFaceEmbeddings(
-        model_name=config.embedding_model,
-        model_kwargs=model_kwargs,
-        # 정규화해야 코사인 유사도가 내적과 같아지고, 문서 길이에 따른 점수 편향이 줄어듭니다.
-        encode_kwargs={"normalize_embeddings": True},
+    def load(device: Optional[str]) -> Embeddings:
+        return HuggingFaceEmbeddings(
+            model_name=config.embedding_model,
+            model_kwargs={"device": device} if device else {},
+            # 정규화해야 코사인 유사도가 내적과 같아지고, 문서 길이에 따른 점수 편향이 줄어듭니다.
+            encode_kwargs={"normalize_embeddings": True},
+        )
+
+    embeddings = load(config.embedding_device)
+    device = str(getattr(getattr(embeddings, "_client", None), "device", config.embedding_device or "?"))
+    worst = embedding_self_test(embeddings)
+    if worst >= _SELF_TEST_MIN_COSINE:
+        logger.info("임베딩 자기검사 통과 (device=%s, 최소 cos=%.4f)", device, worst)
+        return embeddings
+
+    if device.startswith("cpu"):
+        raise IndexingError(
+            f"임베딩 자기검사 실패: CPU에서도 단건/배치 인코딩 결과가 다릅니다 (최소 cos={worst:.3f}). "
+            "torch / sentence-transformers 버전을 확인하세요."
+        )
+    # 실제 사례: torch 2.8 + Apple MPS에서 bge-m3로 "짧은 문장을 1건만" 인코딩하면 엉뚱한 벡터가
+    # 나옵니다(cos 0.16~0.24). 질의는 항상 짧은 문장 1건이라 Dense 검색이 오류 없이 망가지고,
+    # BM25가 일부를 가려 주기 때문에 발견도 어렵습니다. 속도보다 정확성이 우선이므로 CPU로 전환합니다.
+    logger.warning(
+        "임베딩 자기검사 실패 (device=%s, 최소 cos=%.3f) → CPU로 전환합니다. "
+        "이 장치의 단건 인코딩 결과가 배치 결과와 다릅니다.", device, worst,
     )
+    embeddings = load("cpu")
+    worst = embedding_self_test(embeddings)
+    if worst < _SELF_TEST_MIN_COSINE:
+        raise IndexingError(f"임베딩 자기검사 실패: CPU 전환 후에도 불일치 (최소 cos={worst:.3f})")
+    return embeddings
+
+
+# 같은 문장의 단건/배치 인코딩은 수치 오차 수준(>0.999)으로 같아야 합니다. 여유를 두고 0.99.
+_SELF_TEST_MIN_COSINE = 0.99
+# 문제는 짧은 문장에서만 나타나므로 짧은 질의형 문장 위주로 구성합니다.
+_SELF_TEST_PROBES = [
+    "볼펜 할인율은?",
+    "짧음",
+    "단가 알려줘",
+    "SKU-00123 재고",
+    "재택근무는 주 2회까지 허용된다",
+    "Chapter 2 unit price",
+]
+
+
+def embedding_self_test(embeddings: Embeddings) -> float:
+    """단건 인코딩(embed_query 경로)과 배치 인코딩(embed_documents 경로)의 일치도를 검사합니다.
+
+    Returns:
+        프로브 문장들 중 최소 코사인 유사도 (1.0에 가까워야 정상)
+    """
+    batch = embeddings.embed_documents(_SELF_TEST_PROBES)
+    worst = 1.0
+    for text, batch_vec in zip(_SELF_TEST_PROBES, batch):
+        single_vec = embeddings.embed_query(text)
+        dot = sum(a * b for a, b in zip(single_vec, batch_vec))
+        norm = (sum(a * a for a in single_vec) ** 0.5) * (sum(b * b for b in batch_vec) ** 0.5)
+        worst = min(worst, dot / norm if norm else 0.0)
+    return worst
 
 
 class IndexStore:
