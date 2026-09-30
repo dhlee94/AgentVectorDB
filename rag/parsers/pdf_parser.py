@@ -25,7 +25,13 @@ import fitz  # PyMuPDF
 
 from rag.config import ParserConfig
 from rag.exceptions import EmptyDocumentError, EncryptedDocumentError, ParserError
-from rag.markdown_utils import normalize_text, page_marker, restore_heading_levels, strip_page_markers
+from rag.markdown_utils import (
+    normalize_text,
+    page_marker,
+    restore_heading_levels,
+    strip_page_markers,
+    strip_symbolic_inline_code,
+)
 from rag.parsers.base import BaseParser, ParseOutput
 
 logger = logging.getLogger(__name__)
@@ -62,6 +68,11 @@ class PDFParser(BaseParser):
     # ------------------------------------------------------------------ main
     def _parse(self, file_path: Path) -> ParseOutput:
         output = self._parse_routed(file_path)
+        if self.config.pdf_strip_symbolic_inline_code:
+            output.markdown, removed = strip_symbolic_inline_code(output.markdown)
+            if removed:
+                output.metadata["inline_code_stripped"] = removed
+                logger.info("숫자·기호만 감싼 인라인 코드 백틱 제거: %d개", removed)
         if self.config.pdf_restore_heading_levels:
             # Docling/PyMuPDF4LLM 모두 제목 계층을 평평하게 뽑는 경우가 많아 번호 패턴으로 복원합니다.
             output.markdown, stats = restore_heading_levels(output.markdown)

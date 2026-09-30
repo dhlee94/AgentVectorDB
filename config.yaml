@@ -20,6 +20,7 @@ parser:
   preflight_sample_pages: 10       # 스캔 여부 판단에 쓰는 샘플 페이지 수
   min_docling_text_ratio: 0.5      # Docling 결과가 원문 텍스트의 이 비율 미만이면 누락으로 보고 Fallback
   pdf_restore_heading_levels: true # 평평하게 추출된 PDF 제목을 "N장 > 소제목 > 1." 계층으로 복원
+  pdf_strip_symbolic_inline_code: true  # `10`, `→`처럼 숫자·기호만 감싼 인라인 코드의 백틱 제거
 
   # --- Excel ---
   excel_force_narrative: false     # true면 모든 시트를 "[행N] 열: 값" 서술형으로 변환

@@ -240,3 +240,54 @@ def restore_heading_levels(markdown: str, min_chapters: int = 2, flat_ratio: flo
                 out.extend([f"## {seg}", ""])
                 stats["sections"] += 1
     return "\n".join(out), stats
+
+
+# ---------------------------------------------------------------------------
+# PDF 인라인 코드 오탐 제거
+# ---------------------------------------------------------------------------
+# 일부 PDF는 본문 속 영문·숫자·기호를 고정폭 글꼴로 조판합니다. PyMuPDF4LLM은 고정폭 글꼴을
+# 코드로 보고 `10`, `→`, `(`처럼 백틱으로 감싸는데, 실제 사례에서 인라인 코드 3,395개 중 69%가
+# 글자 없이 숫자·기호만 감싼 오탐이었습니다. 이런 백틱은 LLM 컨텍스트에 잡음을 더하고
+# "10 스텝마다" 같은 정확한 문구 대조를 방해하므로 벗겨냅니다.
+_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+
+
+def _has_letter(text: str) -> bool:
+    return any(unicodedata.category(ch).startswith("L") for ch in text)
+
+
+def strip_symbolic_inline_code(markdown: str) -> Tuple[str, int]:
+    """글자(한글·영문 등)가 없는 인라인 코드의 백틱을 제거합니다. 코드 블록(```) 안은 건드리지 않습니다.
+
+    예외(백틱 유지):
+      - 줄 맨 앞의 `#…` : 벗기면 Markdown 헤더가 되어 청킹이 깨짐
+      - `|`가 들어간 것  : 벗기면 표 행으로 오인될 수 있음
+    글자가 들어간 `ralph.set_goal(` 같은 조각은 실제 코드일 수 있어 보수적으로 남깁니다.
+
+    Returns:
+        (변환된 markdown, 제거한 인라인 코드 수)
+    """
+    removed = 0
+    out: List[str] = []
+    in_fence = False
+
+    for line in markdown.split("\n"):
+        if line.strip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence or "`" not in line:
+            out.append(line)
+            continue
+
+        def repl(match: "re.Match[str]") -> str:
+            nonlocal removed
+            content = match.group(1)
+            at_line_start = not line[: match.start()].strip()
+            if _has_letter(content) or "|" in content or (at_line_start and content.lstrip().startswith("#")):
+                return match.group(0)
+            removed += 1
+            return content
+
+        out.append(_INLINE_CODE_RE.sub(repl, line))
+    return "\n".join(out), removed
