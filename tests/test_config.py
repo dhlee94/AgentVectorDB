@@ -14,10 +14,18 @@ from rag.exceptions import ConfigError
 REPO_CONFIG = Path(__file__).resolve().parents[1] / "config.yaml"
 
 
-def test_repo_config_yaml_matches_code_defaults():
-    # config.yaml과 dataclass 기본값이 어긋나면 "파일을 안 쓰면 다른 설정"이 되는 혼란이 생김
-    loaded = PipelineConfig.from_yaml(REPO_CONFIG)
-    assert dataclasses.asdict(loaded) == dataclasses.asdict(PipelineConfig())
+def test_repo_config_yaml_lists_every_setting_and_is_valid():
+    # config.yaml은 "전체 설정을 한 곳에서" 보는 파일이므로 모든 항목이 적혀 있어야 합니다.
+    # 값은 운영에 맞게 기본값과 달라도 됩니다 (예: pdf_inline_code_strip: all).
+    import yaml
+
+    raw = yaml.safe_load(REPO_CONFIG.read_text(encoding="utf-8"))
+    defaults = dataclasses.asdict(PipelineConfig())
+    missing = [
+        f"{section}.{key}" for section, values in defaults.items() for key in values if key not in raw.get(section, {})
+    ]
+    assert not missing, f"config.yaml에 빠진 설정: {missing}"
+    PipelineConfig.from_yaml(REPO_CONFIG)  # 오타·범위·모델 호환성 검사 통과
 
 
 def _write(tmp_path, text: str) -> Path:
@@ -37,6 +45,8 @@ def _write(tmp_path, text: str) -> Path:
         ("chunker:\n  child_chunk_chars: 5000\n", "parent_max_chars보다 작아야"),
         ("retriever:\n  top_n: 0\n", "양수여야"),
         ("generation: 3\n", "섹션이어야"),
+        ("parser:\n  pdf_inline_code_strip: everything\n", "off', 'symbolic', 'all"),
+        ("parser:\n  pdf_strip_symbolic_inline_code: true\n", "이름이 바뀌었습니다 → parser.pdf_inline_code_strip"),
     ],
 )
 def test_invalid_configs_rejected(tmp_path, yaml_text, message):

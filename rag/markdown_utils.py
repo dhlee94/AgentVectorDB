@@ -256,17 +256,31 @@ def _has_letter(text: str) -> bool:
     return any(unicodedata.category(ch).startswith("L") for ch in text)
 
 
-def strip_symbolic_inline_code(markdown: str) -> Tuple[str, int]:
-    """글자(한글·영문 등)가 없는 인라인 코드의 백틱을 제거합니다. 코드 블록(```) 안은 건드리지 않습니다.
+INLINE_CODE_STRIP_MODES = ("off", "symbolic", "all")
 
-    예외(백틱 유지):
-      - 줄 맨 앞의 `#…` : 벗기면 Markdown 헤더가 되어 청킹이 깨짐
-      - `|`가 들어간 것  : 벗기면 표 행으로 오인될 수 있음
-    글자가 들어간 `ralph.set_goal(` 같은 조각은 실제 코드일 수 있어 보수적으로 남깁니다.
+
+def strip_inline_code(markdown: str, mode: str = "symbolic") -> Tuple[str, int]:
+    """인라인 코드의 백틱을 제거합니다. 코드 블록(```) 안은 건드리지 않습니다.
+
+    mode
+      - "off"      : 아무것도 하지 않음
+      - "symbolic" : 글자(한글·영문 등)가 없는 것만 제거 — `10`, `→`, `(`  (기본, 보수적)
+      - "all"      : 글자가 있어도 제거 — `(repository)`, `SQL`, `ralph.set_goal(` 까지.
+                     실제 코드가 코드 블록에 따로 들어 있는 문서(책, 매뉴얼)에 적합하며,
+                     본문 속 진짜 인라인 코드 표시(`CLAUDE.md` 등)도 함께 사라집니다(글자는 보존).
+
+    모든 모드 공통 예외(백틱 유지): 벗기면 Markdown 구조가 바뀌는 경우
+      - 줄 맨 앞의 `#…` : Markdown 헤더가 되어 청킹이 깨짐
+      - `|`가 들어간 것  : 표 행으로 오인될 수 있음
 
     Returns:
         (변환된 markdown, 제거한 인라인 코드 수)
     """
+    if mode not in INLINE_CODE_STRIP_MODES:
+        raise ValueError(f"mode는 {INLINE_CODE_STRIP_MODES} 중 하나여야 합니다: {mode!r}")
+    if mode == "off":
+        return markdown, 0
+
     removed = 0
     out: List[str] = []
     in_fence = False
@@ -284,10 +298,17 @@ def strip_symbolic_inline_code(markdown: str) -> Tuple[str, int]:
             nonlocal removed
             content = match.group(1)
             at_line_start = not line[: match.start()].strip()
-            if _has_letter(content) or "|" in content or (at_line_start and content.lstrip().startswith("#")):
+            if "|" in content or (at_line_start and content.lstrip().startswith("#")):
+                return match.group(0)
+            if mode == "symbolic" and _has_letter(content):
                 return match.group(0)
             removed += 1
             return content
 
         out.append(_INLINE_CODE_RE.sub(repl, line))
     return "\n".join(out), removed
+
+
+def strip_symbolic_inline_code(markdown: str) -> Tuple[str, int]:
+    """`strip_inline_code(markdown, "symbolic")`의 축약형."""
+    return strip_inline_code(markdown, "symbolic")

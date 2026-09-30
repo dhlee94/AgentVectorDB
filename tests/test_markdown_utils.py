@@ -10,6 +10,7 @@ from rag.markdown_utils import (
     is_table_separator,
     normalize_text,
     restore_heading_levels,
+    strip_inline_code,
     strip_symbolic_inline_code,
 )
 
@@ -39,6 +40,35 @@ def test_strip_symbolic_inline_code_is_idempotent():
     once, n = strip_symbolic_inline_code("`10` 스텝, `→` 화살표, 줄 중간 `#` 기호")
     assert n == 3  # 줄 중간의 `#`는 헤더가 될 위험이 없으므로 제거 대상
     assert strip_symbolic_inline_code(once) == (once, 0)
+
+
+@pytest.mark.parametrize(
+    "src, expected",
+    [
+        ("대규모 저장소 `(repository)` 를 분석", "대규모 저장소 (repository) 를 분석"),
+        ('`ralph.set_goal("src/` 디렉토리', 'ralph.set_goal("src/ 디렉토리'),
+        ("`10` 스텝과 `SQL` 쿼리", "10 스텝과 SQL 쿼리"),
+        # all 모드에서도 Markdown 구조를 바꾸는 경우는 유지
+        ("`# Ralph Loop` 초기화", "`# Ralph Loop` 초기화"),
+        ("`a | b` 파이프", "`a | b` 파이프"),
+        ("```\n`code` 블록 안\n```", "```\n`code` 블록 안\n```"),
+    ],
+)
+def test_strip_inline_code_all_mode(src, expected):
+    assert strip_inline_code(src, "all")[0] == expected
+
+
+def test_strip_inline_code_off_and_invalid_mode():
+    text = "`10` 과 `SQL`"
+    assert strip_inline_code(text, "off") == (text, 0)
+    with pytest.raises(ValueError):
+        strip_inline_code(text, "everything")
+
+
+def test_all_mode_removes_superset_of_symbolic():
+    text = "`10` 스텝, `(AI` 에이전트, `→` 화살표, `CLAUDE.md` 파일"
+    assert strip_inline_code(text, "symbolic")[1] == 2
+    assert strip_inline_code(text, "all") == ("10 스텝, (AI 에이전트, → 화살표, CLAUDE.md 파일", 4)
 
 
 # ---------------------------------------------------------- 헤더 수준 복원

@@ -46,8 +46,9 @@ class ParserConfig:
     # PDF 헤더가 한 수준(##)으로 평평하게 추출되면 "N장/부록/1." 번호 패턴으로 계층을 복원합니다.
     # (이미 계층이 살아 있는 PDF에는 자동으로 적용되지 않습니다)
     pdf_restore_heading_levels: bool = True
-    # 고정폭 글꼴로 조판된 숫자·기호가 `10`, `→`처럼 인라인 코드로 추출되면 백틱을 벗겨냅니다.
-    pdf_strip_symbolic_inline_code: bool = True
+    # 고정폭 글꼴로 조판된 본문이 인라인 코드(`10`, `→`, `(AI`)로 추출될 때 백틱 제거 범위.
+    #   "off" | "symbolic"(글자 없는 것만, 기본) | "all"(글자 있어도 전부, 코드 블록은 유지)
+    pdf_inline_code_strip: str = "symbolic"
 
     # ---------------------------------------------------------------- Excel
     # True면 병합 셀 유무와 관계없이 모든 시트를 서술형 템플릿으로 변환합니다.
@@ -189,6 +190,8 @@ class PipelineConfig:
             errors.append("retriever의 dense_k / sparse_k / top_n / rrf_k는 양수여야 합니다")
         if r.dense_weight < 0 or r.sparse_weight < 0 or r.dense_weight + r.sparse_weight == 0:
             errors.append("retriever 가중치는 0 이상이고 합이 0보다 커야 합니다")
+        if self.parser.pdf_inline_code_strip not in _INLINE_CODE_STRIP_MODES:
+            errors.append(f"parser.pdf_inline_code_strip는 {_INLINE_CODE_STRIP_MODES} 중 하나여야 합니다")
         if g.max_tokens <= 0:
             errors.append("generation.max_tokens는 양수여야 합니다")
         errors.extend(_model_compat_errors(g))
@@ -248,6 +251,9 @@ DEFAULT_CONFIG_FILE = "config.yaml"
 # ---------------------------------------------------------------------------
 # 모델별 파라미터 호환성 (2026-09 기준). 목록은 조기 경고용이며, 최종 판단은 API 응답입니다.
 # ---------------------------------------------------------------------------
+_INLINE_CODE_STRIP_MODES = ("off", "symbolic", "all")  # markdown_utils.INLINE_CODE_STRIP_MODES와 동일
+# 이름이 바뀐 설정 키 → 새 이름 안내 (예전 config.yaml을 쓰는 사람이 "알 수 없는 키"에서 헤매지 않도록)
+_RENAMED_KEYS = {"pdf_strip_symbolic_inline_code": "pdf_inline_code_strip (값: off / symbolic / all)"}
 _RETIRED_PREFIXES = ("claude-3", "claude-2", "claude-instant")
 _EFFORT_UNSUPPORTED_PREFIXES = ("claude-haiku", "claude-sonnet-4-5", "claude-sonnet-4-0", "claude-opus-4-0", "claude-opus-4-1")
 _TEMPERATURE_UNSUPPORTED_PREFIXES = (
@@ -287,6 +293,8 @@ def _apply_overrides(target: Any, values: Dict[str, Any], prefix: str, source: P
     for key, value in values.items():
         dotted = f"{prefix}{key}"
         if key not in known:
+            if key in _RENAMED_KEYS:
+                raise ConfigError(f"'{dotted}'는 이름이 바뀌었습니다 → {prefix}{_RENAMED_KEYS[key]}", source=source)
             raise ConfigError(f"알 수 없는 설정 키: '{dotted}' (가능한 키: {', '.join(known)})", source=source)
         current = getattr(target, key)
         if is_dataclass(current):

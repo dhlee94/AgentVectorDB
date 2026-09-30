@@ -20,7 +20,12 @@ parser:
   preflight_sample_pages: 10       # 스캔 여부 판단에 쓰는 샘플 페이지 수
   min_docling_text_ratio: 0.5      # Docling 결과가 원문 텍스트의 이 비율 미만이면 누락으로 보고 Fallback
   pdf_restore_heading_levels: true # 평평하게 추출된 PDF 제목을 "N장 > 소제목 > 1." 계층으로 복원
-  pdf_strip_symbolic_inline_code: true  # `10`, `→`처럼 숫자·기호만 감싼 인라인 코드의 백틱 제거
+  # 고정폭 글꼴 본문이 `10`, `→`, `(AI`처럼 인라인 코드로 잘못 추출될 때 백틱 제거 범위
+  #   off      : 제거 안 함
+  #   symbolic : 숫자·기호만 감싼 것만 제거 (기본, 보수적)
+  #   all      : 글자가 있어도 전부 제거 — 실제 코드가 코드 블록에 따로 있는 책·매뉴얼에 적합
+  #   (어느 모드든 코드 블록 안, 줄 맨 앞의 `#`, `|`가 든 것은 Markdown 구조 보호를 위해 유지)
+  pdf_inline_code_strip: "all"     # 이 프로젝트의 책 PDF는 코드가 코드 블록에 따로 있어 all 사용
 
   # --- Excel ---
   excel_force_narrative: false     # true면 모든 시트를 "[행N] 열: 값" 서술형으로 변환
