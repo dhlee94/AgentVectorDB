@@ -78,6 +78,14 @@ retriever:
   sparse_weight: 0.5
   top_n: 5                         # LLM에 전달할 Parent 수
 
+  # Cross-Encoder 재순위기 (null이면 끔). 흔한 단어가 많은 질문에서 무관한 장이 섞이는 문제를 줄입니다.
+  # 처음 실행 시 모델 약 2.3GB 다운로드, 질의당 수 초 추가.
+  reranker_model: "BAAI/bge-reranker-v2-m3"
+  reranker_device: null            # null=자동. 자기검사(단건 vs 배치) 실패 시 CPU로 전환
+  rerank_candidates: 40            # RRF 상위 몇 개의 Child를 재순위할지
+  reranker_max_length: 512         # 입력 최대 토큰 (Child는 최대 500자라 잘리지 않음)
+  rerank_min_score: 0.1            # 이 점수 미만 문서는 LLM에 안 넘김 (0=끔). 전부 미달이면 LLM 호출 없이 "확인 불가"
+
 
 # -----------------------------------------------------------------------------
 # 5. 답변 생성 (Claude)

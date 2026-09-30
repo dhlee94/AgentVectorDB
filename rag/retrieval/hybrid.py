@@ -4,8 +4,8 @@
     질문 ─┬─ Dense (Chroma, bge-m3) → Child 후보 dense_k개 (순위 r_d)
           └─ Sparse(BM25, Kiwi)     → Child 후보 sparse_k개 (순위 r_s)
     RRF(child) = w_d/(rrf_k + r_d) + w_s/(rrf_k + r_s)       ← 한쪽에만 있으면 그쪽 항만
-    Parent 점수 = 소속 Child들의 RRF 최댓값 → 상위 top_n개 Parent를 Docstore에서 조회
-    (선택) Cross-Encoder로 Parent 재순위
+    (선택) RRF 상위 Child를 Cross-Encoder로 재채점
+    Parent 점수 = 소속 Child들의 점수 최댓값 → 상위 top_n개 Parent를 Docstore에서 조회
 
 [왜 Child 단계에서 융합하는가]
 LangChain `ParentDocumentRetriever`는 Dense만 지원하고, `EnsembleRetriever`로 Parent끼리
@@ -37,20 +37,54 @@ logger = logging.getLogger(__name__)
 
 
 class CrossEncoderReranker:
-    """(선택) Parent 재순위기. 질문과 Parent 본문을 쌍으로 직접 비교해 RRF보다 정밀하게 정렬합니다.
+    """Cross-Encoder 재순위기. 질문과 청크를 한 쌍으로 모델에 넣어 관련도를 직접 계산합니다.
 
-    RRF는 "어느 검색기에서 몇 등이었나"만 보므로, 최종 3~5개를 고르는 단계에서는
-    Cross-Encoder가 정확도를 크게 올립니다. 대신 후보마다 모델 추론이 필요해 느립니다.
+    임베딩(Bi-Encoder)은 질문과 문서를 따로 벡터화해 비교하므로 빠르지만 거칩니다.
+    Cross-Encoder는 둘을 함께 읽어 "이 청크가 이 질문에 답하는가"를 판단하므로 훨씬 정확하지만,
+    후보마다 모델 추론이 필요해 느립니다. 그래서 RRF로 좁힌 후보에만 적용합니다.
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-reranker-v2-m3", device: Optional[str] = None) -> None:
+    # 같은 쌍의 단건/배치 점수 차이 허용치 (점수는 0~1 sigmoid)
+    _SELF_TEST_TOLERANCE = 0.01
+    _SELF_TEST_PAIRS = [
+        ("볼펜 할인율은?", "[행5] 품목: 볼펜, 할인율: 10%"),
+        ("보안 위협", "프롬프트 인젝션 방어 레이어"),
+        ("짧음", "재택근무는 주 2회까지 허용된다"),
+        ("Ralph Loop", "컨텍스트 불안을 극복하는 방법"),
+    ]
+
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-reranker-v2-m3",
+        device: Optional[str] = None,
+        max_length: int = 512,
+    ) -> None:
         try:
             from sentence_transformers import CrossEncoder
         except ImportError as exc:
             raise ImportError("재순위에는 `pip install sentence-transformers`가 필요합니다") from exc
-        self._model = CrossEncoder(model_name, device=device)
+
+        self._model = CrossEncoder(model_name, device=device, max_length=max_length)
+        worst = self.self_test()
+        current = str(getattr(self._model, "device", device or "?"))
+        if worst > self._SELF_TEST_TOLERANCE:
+            if current.startswith("cpu"):
+                raise RuntimeError(f"재순위기 자기검사 실패: CPU에서도 단건/배치 점수가 다릅니다 (최대 차이 {worst:.3f})")
+            # 임베딩과 같은 이유: 일부 GPU 백엔드(Apple MPS 등)에서 입력 1건 추론이 틀리는 사례가 있음
+            logger.warning("재순위기 자기검사 실패 (device=%s, 최대 차이 %.3f) → CPU로 전환", current, worst)
+            self._model = CrossEncoder(model_name, device="cpu", max_length=max_length)
+            if self.self_test() > self._SELF_TEST_TOLERANCE:
+                raise RuntimeError("재순위기 자기검사 실패: CPU 전환 후에도 불일치")
+        logger.info("재순위기 준비 완료: %s (device=%s)", model_name, getattr(self._model, "device", "?"))
+
+    def self_test(self) -> float:
+        """같은 (질문, 문서) 쌍을 배치로 채점한 값과 1건씩 채점한 값의 최대 차이."""
+        batch = self._model.predict(self._SELF_TEST_PAIRS)
+        return max(abs(float(self._model.predict([pair])[0]) - float(b)) for pair, b in zip(self._SELF_TEST_PAIRS, batch))
 
     def score(self, query: str, texts: Sequence[str]) -> List[float]:
+        if not texts:
+            return []
         return [float(s) for s in self._model.predict([(query, t) for t in texts])]
 
 
@@ -104,43 +138,64 @@ class HybridParentRetriever(BaseRetriever):
 
         # 2) Child 단위 RRF 융합
         fused: Dict[str, float] = defaultdict(float)
-        child_parent: Dict[str, str] = {}
+        child_docs: Dict[str, Document] = {}
         child_hits: Dict[str, List[str]] = defaultdict(list)
         for name, docs, weight in (("dense", dense, cfg.dense_weight), ("sparse", sparse, cfg.sparse_weight)):
             for rank, doc in enumerate(docs, start=1):
                 child_id = doc.metadata.get("child_id")
-                parent_id = doc.metadata.get("parent_id")
-                if not child_id or not parent_id:
+                if not child_id or not doc.metadata.get("parent_id"):
                     continue  # 스키마가 다른(구버전) 청크 방어
                 fused[child_id] += weight / (cfg.rrf_k + rank)
-                child_parent[child_id] = parent_id
+                child_docs[child_id] = doc
                 if name not in child_hits[child_id]:
                     child_hits[child_id].append(name)
 
         if not fused:
             return []
 
-        # 3) Parent로 승격 — 소속 Child 중 최고 점수를 Parent 점수로 사용
+        # 3) (선택) Child 단위 Cross-Encoder 재순위
+        #    Parent(최대 3,000자)가 아니라 Child(최대 500자)를 채점합니다. Parent를 넣으면 재순위기
+        #    입력 한도(512토큰)에서 뒷부분이 잘려, 정작 답이 있는 부분을 못 보고 점수를 매기게 됩니다.
+        #    검색 단위(Child)끼리 경쟁시키고 승자를 Parent로 올리는 Small-to-Big 원칙과도 일치합니다.
+        child_score: Dict[str, float] = dict(fused)
+        reranked = False
+        if self.reranker is not None:
+            candidates = sorted(fused, key=lambda cid: fused[cid], reverse=True)[: cfg.rerank_candidates]
+            try:
+                scores = self.reranker.score(query, [child_docs[cid].page_content for cid in candidates])
+                # 후보 밖 Child는 버립니다: RRF 하위권이 재순위 점수 없이 섞이면 비교가 불가능
+                child_score = dict(zip(candidates, scores))
+                for cid in candidates:
+                    child_hits[cid].append("rerank")
+                reranked = True
+            except Exception as exc:  # noqa: BLE001 — 재순위 실패 시 RRF 점수 그대로 사용
+                logger.warning("재순위 실패 → RRF 순서 유지: %s", exc)
+
+        # 4) Parent로 승격 — 소속 Child 중 최고 점수를 Parent 점수로 사용
         #    (합산을 쓰면 표가 20조각으로 잘린 Parent가 Child 수만으로 상위를 독식합니다)
         parent_score: Dict[str, float] = {}
         parent_children: Dict[str, List[str]] = defaultdict(list)
         parent_retrievers: Dict[str, List[str]] = defaultdict(list)
-        for child_id, score in sorted(fused.items(), key=lambda kv: kv[1], reverse=True):
-            pid = child_parent[child_id]
-            parent_score[pid] = max(parent_score.get(pid, 0.0), score)
+        for child_id, score in sorted(child_score.items(), key=lambda kv: kv[1], reverse=True):
+            pid = child_docs[child_id].metadata["parent_id"]
+            parent_score[pid] = max(parent_score.get(pid, float("-inf")), score)
             parent_children[pid].append(child_id)
             for name in child_hits[child_id]:
                 if name not in parent_retrievers[pid]:
                     parent_retrievers[pid].append(name)
 
-        ranked_ids = sorted(parent_score, key=lambda pid: parent_score[pid], reverse=True)
-        # 재순위기가 있으면 후보를 넉넉히(2배) 가져와 재정렬 후 top_n만 남깁니다.
-        n_candidates = cfg.top_n * 2 if self.reranker is not None else cfg.top_n
-        candidate_ids = ranked_ids[:n_candidates]
+        top_ids = sorted(parent_score, key=lambda pid: parent_score[pid], reverse=True)[: cfg.top_n]
+        if reranked and cfg.rerank_min_score > 0:
+            # 재순위 점수는 0~1 절대 척도라 "관련 없음"을 판단할 수 있습니다 (RRF 점수는 상대 순위라 불가).
+            # 잡음 문서를 LLM에 넘기면 토큰만 쓰고 출처 혼동을 일으키므로 걸러냅니다.
+            kept = [pid for pid in top_ids if parent_score[pid] >= cfg.rerank_min_score]
+            if len(kept) < len(top_ids):
+                logger.info("재순위 점수 %.2f 미만 Parent %d개 제외", cfg.rerank_min_score, len(top_ids) - len(kept))
+            top_ids = kept
 
-        # 4) Docstore에서 Parent 본문 조회
+        # 5) Docstore에서 Parent 본문 조회
         results: List[RetrievedParent] = []
-        for pid, doc in zip(candidate_ids, self.store.get_parents(candidate_ids)):
+        for pid, doc in zip(top_ids, self.store.get_parents(top_ids)):
             if doc is None:
                 # Chroma와 Docstore가 어긋난 상태(부분 실패 후 수동 삭제 등). 조용히 넘기면
                 # 원인 추적이 불가능하므로 경고를 남기고 건너뜁니다.
@@ -155,18 +210,7 @@ class HybridParentRetriever(BaseRetriever):
                     retrievers=parent_retrievers[pid],
                 )
             )
-
-        # 5) (선택) Cross-Encoder 재순위
-        if self.reranker is not None and results:
-            try:
-                scores = self.reranker.score(query, [r.document.page_content for r in results])
-                for r, s in zip(results, scores):
-                    r.score = s
-                results.sort(key=lambda r: r.score, reverse=True)
-            except Exception as exc:  # noqa: BLE001 — 재순위 실패 시 RRF 순서 그대로 사용
-                logger.warning("재순위 실패 → RRF 순서 유지: %s", exc)
-
-        return results[: cfg.top_n]
+        return results
 
     @staticmethod
     def _safe_search(name: str, fn: Any, query: str, k: int, where: Optional[Dict[str, Any]]):

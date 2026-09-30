@@ -118,6 +118,20 @@ class RetrieverConfig:
     # LLM에 전달할 Parent 수
     top_n: int = 5
 
+    # (선택) Cross-Encoder 재순위기. None이면 RRF 순위를 그대로 씁니다.
+    # RRF는 "각 검색기에서 몇 등이었나"만 보므로, 흔한 단어("하네스", "AI")가 많은 질문에서
+    # 무관한 장이 섞입니다. 재순위기는 질문과 청크를 직접 비교해 순위를 다시 매깁니다.
+    reranker_model: Optional[str] = None
+    reranker_device: Optional[str] = None  # None=자동. 자기검사 실패 시 CPU로 전환
+    # RRF 상위 몇 개의 Child를 재순위할지. dense_k + sparse_k 이하면 후보 전체.
+    rerank_candidates: int = 40
+    # 재순위기 입력 최대 토큰. Child(최대 500자)는 이 안에 다 들어갑니다.
+    reranker_max_length: int = 512
+    # 재순위 점수(0~1)가 이 값 미만인 Parent는 LLM에 넘기지 않습니다. 0이면 끔.
+    # 실측(책 PDF, 질문 10개): 관련 문서 ≥0.12, 잡음 ≤0.07, 책에 없는 질문은 전부 ≤0.008.
+    # 모두 미달이면 검색 결과 0건 → LLM을 호출하지 않고 "확인할 수 없습니다"로 답합니다.
+    rerank_min_score: float = 0.1
+
 
 @dataclass
 class GenerationConfig:
@@ -186,8 +200,12 @@ class PipelineConfig:
             errors.append("chunker.parent_min_chars는 parent_max_chars 이하여야 합니다")
         if c.child_overlap_chars >= c.child_chunk_chars:
             errors.append("chunker.child_overlap_chars는 child_chunk_chars보다 작아야 합니다")
-        if min(r.dense_k, r.sparse_k, r.top_n, r.rrf_k) <= 0:
-            errors.append("retriever의 dense_k / sparse_k / top_n / rrf_k는 양수여야 합니다")
+        if min(r.dense_k, r.sparse_k, r.top_n, r.rrf_k, r.rerank_candidates, r.reranker_max_length) <= 0:
+            errors.append(
+                "retriever의 dense_k / sparse_k / top_n / rrf_k / rerank_candidates / reranker_max_length는 양수여야 합니다"
+            )
+        if not 0.0 <= r.rerank_min_score <= 1.0:
+            errors.append("retriever.rerank_min_score는 0.0~1.0 사이여야 합니다")
         if r.dense_weight < 0 or r.sparse_weight < 0 or r.dense_weight + r.sparse_weight == 0:
             errors.append("retriever 가중치는 0 이상이고 합이 0보다 커야 합니다")
         if self.parser.pdf_inline_code_strip not in _INLINE_CODE_STRIP_MODES:

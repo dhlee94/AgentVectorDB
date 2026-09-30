@@ -38,7 +38,7 @@ from rag.exceptions import GenerationError, RAGError, RetrievalError
 from rag.generation import NO_ANSWER, AnswerGenerator
 from rag.indexing import IndexStore, KoreanTokenizer, build_default_embeddings
 from rag.parsers import ParserRouter
-from rag.retrieval import HybridParentRetriever
+from rag.retrieval import CrossEncoderReranker, HybridParentRetriever
 from rag.schemas import Citation, IngestReport, ParseFailure, RAGAnswer
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,8 @@ class RAGPipeline:
                 주입한 경우 config.store.embedding_model에 그 모델 이름을 맞춰 주세요
                 (매니페스트의 모델 불일치 검사에 쓰입니다).
             llm_client: anthropic.Anthropic 호환 클라이언트 (테스트용 주입).
-            reranker: `score(query, texts) -> List[float]`를 가진 재순위기 (선택).
+            reranker: `score(query, texts) -> List[float]`를 가진 재순위기. None이면
+                config.retriever.reranker_model 설정에 따라 bge-reranker를 로드합니다.
         """
         # .env(API 키 등)를 먼저 환경변수로 올립니다. config를 주지 않으면 config.yaml(또는
         # RAG_CONFIG)을 읽고, 없으면 코드 기본값을 씁니다.
@@ -72,9 +73,17 @@ class RAGPipeline:
             embeddings or build_default_embeddings(self.config.store),
             KoreanTokenizer(),
         )
-        self.retriever = HybridParentRetriever(
-            store=self.store, config=self.config.retriever, reranker=reranker
-        )
+        rcfg = self.config.retriever
+        if reranker is None and rcfg.reranker_model:
+            # 재순위 모델 로드 실패(미설치, 다운로드 실패)가 파이프라인 전체를 막지 않도록,
+            # 경고만 남기고 RRF 순위로 동작합니다. 검색 품질은 떨어지지만 서비스는 계속됩니다.
+            try:
+                reranker = CrossEncoderReranker(
+                    rcfg.reranker_model, device=rcfg.reranker_device, max_length=rcfg.reranker_max_length
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("재순위기 로드 실패 → 재순위 없이 동작합니다: %s", exc)
+        self.retriever = HybridParentRetriever(store=self.store, config=rcfg, reranker=reranker)
         self.generator = AnswerGenerator(self.config.generation, client=llm_client)
 
     # ================================================================ ingest

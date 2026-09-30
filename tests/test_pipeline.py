@@ -200,3 +200,77 @@ def test_citations_listed_in_index_order(indexed, fake_llm):
     fake_llm.reply = "첫 사실 [3]. 둘째 사실 [1]."
     answer = indexed.query("볼펜 할인율과 부품 가격")
     assert [c.index for c in answer.citations] == [1, 3]
+
+
+# ------------------------------------------------------------ reranking
+class _KeywordReranker:
+    """키워드가 있으면 높은 점수를 주는 가짜 재순위기. 받은 텍스트를 기록합니다."""
+
+    def __init__(self, keyword: str, hit: float = 0.9, miss: float = 0.2) -> None:
+        self.keyword, self.hit, self.miss = keyword, hit, miss
+        self.seen: List[str] = []
+
+    def score(self, query, texts):
+        self.seen = list(texts)
+        return [self.hit if self.keyword in t else self.miss for t in texts]
+
+
+def test_reranker_scores_children_and_reorders_parents(indexed):
+    indexed.retriever.reranker = _KeywordReranker("부품-027")
+    top = indexed.retriever.retrieve("부품 가격 단가")[0]
+    assert "부품-027" in top.document.page_content and "rerank" in top.retrievers
+    # Parent(최대 3,000자)가 아니라 Child(최대 500자)를 채점해야 재순위기 입력 한도에서 잘리지 않음
+    assert max(len(t) for t in indexed.retriever.reranker.seen) <= indexed.config.chunker.child_chunk_chars + 50
+
+
+def test_rerank_candidates_limit(indexed):
+    indexed.retriever.reranker = _KeywordReranker("볼펜")
+    indexed.config.retriever.rerank_candidates = 3
+    indexed.retriever.retrieve("볼펜 할인율")
+    assert len(indexed.retriever.reranker.seen) == 3
+
+
+def test_reranker_failure_falls_back_to_rrf(indexed):
+    baseline = [r.parent_id for r in indexed.retriever.retrieve("볼펜 할인율")]
+
+    class Broken:
+        def score(self, query, texts):
+            raise RuntimeError("model crashed")
+
+    indexed.retriever.reranker = Broken()
+    assert [r.parent_id for r in indexed.retriever.retrieve("볼펜 할인율")] == baseline
+
+
+def test_rerank_min_score_drops_noise(indexed):
+    indexed.retriever.reranker = _KeywordReranker("볼펜", hit=0.9, miss=0.05)
+    results = indexed.retriever.retrieve("볼펜 할인율")
+    assert results and all("볼펜" in r.document.page_content for r in results)
+
+
+def test_all_below_min_score_skips_llm(indexed, fake_llm):
+    indexed.retriever.reranker = _KeywordReranker("존재하지않는키워드", miss=0.008)
+    answer = indexed.query("하네스 엔지니어의 평균 연봉은?")
+    assert answer.answer == NO_ANSWER and fake_llm.calls == []
+
+
+def test_cross_encoder_self_test_falls_back_to_cpu(monkeypatch):
+    """단건 추론만 틀리는 장치(MPS 버그)를 흉내 내 CPU 전환 경로를 모델 없이 검증."""
+    import sys
+    import types
+
+    from rag.retrieval import CrossEncoderReranker
+
+    loaded: List[str] = []
+
+    class FakeCrossEncoder:
+        def __init__(self, name, device=None, max_length=512):
+            self.device = device or "mps"
+            loaded.append(self.device)
+
+        def predict(self, pairs):
+            broken_single = self.device != "cpu" and len(pairs) == 1
+            return [0.0 if broken_single else 0.5 + 0.01 * len(q) for q, _ in pairs]
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(CrossEncoder=FakeCrossEncoder))
+    reranker = CrossEncoderReranker("fake-model")
+    assert loaded == ["mps", "cpu"] and reranker._model.device == "cpu"
