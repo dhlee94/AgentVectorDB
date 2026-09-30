@@ -32,7 +32,8 @@ SYSTEM_PROMPT = f"""당신은 회사 내부 문서에 근거해서만 답하는 
 사용자 메시지의 <documents> 안에 검색된 문서 발췌가 번호와 함께 주어집니다. 다음 규칙을 따르세요.
 
 1. <documents>에 있는 내용만 근거로 답합니다. 일반 상식이나 추측으로 빈칸을 채우지 않습니다. 문서가 질문의 일부에만 답한다면, 확인되는 부분만 답하고 확인되지 않는 부분은 그렇다고 밝힙니다.
-2. 문서에서 가져온 사실이 들어간 문장마다 끝에 근거 문서 번호를 [1] 또는 [1][3] 형식으로 붙입니다. 번호는 <document index="..."> 값만 사용합니다.
+2. 문서에서 가져온 사실이 들어간 문장마다 문장 끝, 마침표 바로 앞에 근거 문서 번호를 [1] 또는 [1][3] 형식으로 붙입니다. 문장 앞이나 제목에는 붙이지 않습니다. 번호는 <document index="..."> 값만 사용합니다.
+   예) AGENTS.md는 OpenAI가 표준화한 규칙 파일입니다 [2].
 3. 수치, 날짜, 제품코드, 고유명사는 문서에 적힌 그대로 옮깁니다. 단위를 바꾸거나 반올림하지 않습니다. 계산이 필요하면 계산에 쓴 원래 값과 그 출처 번호를 함께 적습니다.
 4. 문서끼리 내용이 다르면 한쪽을 고르지 말고 각 내용을 출처 번호와 함께 모두 제시합니다.
 5. 질문에 답할 근거가 문서에 전혀 없으면 정확히 "{NO_ANSWER}"라고만 답합니다.
@@ -43,6 +44,7 @@ SYSTEM_PROMPT = f"""당신은 회사 내부 문서에 근거해서만 답하는 
 # [1], [1][3], [1, 3], [1，3] 모두 인식 (전각 쉼표 포함)
 _CITATION_RE = re.compile(r"\[(\d+(?:\s*[,，]\s*\d+)*)\]")
 _TAG_LINE_RE = re.compile(r"^\[문서명: .*\]$")
+_REMOVED_MARK = "\x00"  # 무효 인용을 지운 위치 표식 (답변 텍스트에 나올 수 없는 문자)
 
 
 class AnswerGenerator:
@@ -102,7 +104,7 @@ class AnswerGenerator:
             warnings.append(f"존재하지 않는 인용 번호를 제거했습니다: {sorted(set(invalid))}")
 
         is_no_answer = answer_text.strip().startswith(NO_ANSWER)
-        citations = [contexts[i - 1] for i in cited]
+        citations = [contexts[i - 1] for i in sorted(cited)]  # 참고 문서 목록은 번호 순
         if not is_no_answer and answer_text and not citations:
             warnings.append("인용 번호가 없는 답변입니다 — 근거를 직접 확인하세요")
 
@@ -241,11 +243,14 @@ class AnswerGenerator:
             for n in valid:
                 if n not in cited:
                     cited.append(n)
-            # [1, 3] → [1][3] 로 형식 통일, 무효 번호만 있던 괄호는 삭제
-            return "".join(f"[{n}]" for n in valid)
+            # [1, 3] → [1][3] 로 형식 통일. 무효 번호만 있던 괄호는 표식만 남기고 삭제
+            return "".join(f"[{n}]" for n in valid) or _REMOVED_MARK
 
         cleaned = _CITATION_RE.sub(repl, text)
-        cleaned = re.sub(r"[ \t]+([.,。])", r"\1", cleaned)  # 인용 삭제로 생긴 "문장 ." 공백 정리
+        # 인용을 지운 자리의 앞 공백만 정리합니다 ("추가 정보 [7]." → "추가 정보.").
+        # 답변 전체에서 마침표 앞 공백을 지우면 "CLAUDE.md, .cursorrules"가
+        # "CLAUDE.md,.cursorrules"로 망가지므로(실제 발생한 버그) 삭제 위치로 한정합니다.
+        cleaned = re.sub(r"[ \t]*" + _REMOVED_MARK, "", cleaned)
         return cleaned.strip(), cited, invalid
 
     @staticmethod

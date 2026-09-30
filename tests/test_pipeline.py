@@ -175,3 +175,28 @@ def test_build_embeddings_fails_if_cpu_also_broken(monkeypatch):
     _patch_hf(monkeypatch, cpu_broken=True)
     with pytest.raises(IndexingError, match="CPU 전환 후에도"):
         build_default_embeddings(StoreConfig())
+
+
+# -------------------------------------------------- citation post-processing
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # 실제 발생한 버그: 전역 공백 정리가 ".cursorrules" 앞 공백을 지웠음
+        ("AGENTS.md, CLAUDE.md, .cursorrules의 차이 [1].", "AGENTS.md, CLAUDE.md, .cursorrules의 차이 [1]."),
+        ("## 3. .cursorrules — Cursor 표준 [1]", "## 3. .cursorrules — Cursor 표준 [1]"),
+        ("값은 1 , 2 입니다 [1].", "값은 1 , 2 입니다 [1]."),  # 인용과 무관한 공백은 그대로
+        # 무효 인용을 지운 자리의 공백만 정리
+        ("추가 정보 [7].", "추가 정보."),
+        ("근거 [1, 9]. 그리고 [8], 끝", "근거 [1]. 그리고, 끝"),
+    ],
+)
+def test_citation_cleanup_only_touches_removed_citations(raw, expected):
+    from rag.generation.answerer import AnswerGenerator
+
+    assert AnswerGenerator._validate_citations(raw, n_contexts=3)[0] == expected
+
+
+def test_citations_listed_in_index_order(indexed, fake_llm):
+    fake_llm.reply = "첫 사실 [3]. 둘째 사실 [1]."
+    answer = indexed.query("볼펜 할인율과 부품 가격")
+    assert [c.index for c in answer.citations] == [1, 3]
